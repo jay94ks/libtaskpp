@@ -29,6 +29,9 @@ include/taskpp          global headers (all public API, `taskpp` namespace)
 modules/core            core module sources -> taskpp::core
   src/                    implementation (+ src/backends: epoll, poll, select/WSAPoll on Windows)
   tests/                  dependency-free unit tests (ctest)
+modules/socket          socket module sources -> taskpp::socket (`taskpp` namespace)
+  src/Socket.cpp + SocketAddress.cpp + Dns.cpp   coroutine `Socket`, `SocketAddress`, `Dns`
+  tests/                  loopback echo / timeout / refused / EOF tests (ctest)
 examples/               runnable samples
 docs/DESIGN.md          gap analysis and design decisions
 ```
@@ -139,6 +142,31 @@ code converts implicitly. The reactor runs on its own thread over a pluggable
 sockets on Windows — regular files/pipes stay POSIX-only).
 `FD_ERROR` / `FD_HANGUP` are always reported. See [docs/DESIGN.md](docs/DESIGN.md)
 for the Windows socket-only note and for adding kqueue / IOCP.
+
+### Sockets
+
+```cpp
+Socket listener = Socket::bind("127.0.0.1", 0);              // ephemeral port
+Socket conn = co_await listener.accept(ct);                // server side
+
+Socket s = co_await Socket::connect("127.0.0.1", port, ct);
+co_await s.sendAll(std::span(data), ct);                   // suspends when unsendable
+std::size_t n = co_await s.recvSome(std::span(buffer), ct); // 0 = orderly shutdown
+co_await s.recvExact(std::span(buffer), ct);               // throws SocketClosed on early EOF
+```
+
+`Socket` is a move-only RAII wrapper over a non-blocking handle — one class
+for TCP and UDP (`SocketType` is a creation option, never stored state). Every
+member suspends on the calling worker (affinity via the `Monitor` reactor) and
+takes an optional `Canceller`; deadlines via `withTimeout`. Buffers must
+outlive the operation. `close()` aborts parked waits first
+(`OperationCanceled`), then releases the handle.
+
+`SocketAddress` is a header-clean value type (no OS headers in the public
+header): numeric factories, `resolve`, `host`/`port`/`toString`. `Dns`
+resolves records as coroutines — numeric literals inline, hostnames through
+c-ares (`third_party/c-ares` submodule, static build, driven by the Monitor
+reactor with zero dedicated threads).
 
 ## License
 

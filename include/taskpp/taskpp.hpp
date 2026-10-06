@@ -7,3 +7,4 @@
 #include <taskpp/TimeSpan.hpp>
 
 #include <taskpp/core/Core.hpp>
+#include <taskpp/socket/Socket.hpp>

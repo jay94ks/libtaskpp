@@ -31,4 +31,11 @@ public:
     using OperationCanceled::OperationCanceled;
 };
 
+/** Thrown when the peer closes a socket before the requested bytes arrive. */
+class SocketClosed : public std::runtime_error {
+public:
+    SocketClosed() : std::runtime_error("the socket was closed by the peer.") { }
+    using std::runtime_error::runtime_error;
+};
+
 } // namespace taskpp

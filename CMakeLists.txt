@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libtaskpp VERSION 0.1.0 LANGUAGES CXX)
+project(libtaskpp VERSION 0.1.0 LANGUAGES C CXX)
 
 if (NOT CMAKE_CXX_STANDARD)
     set(CMAKE_CXX_STANDARD 20)
@@ -24,8 +24,16 @@ target_include_directories(taskpp_common INTERFACE
     $<INSTALL_INTERFACE:include>)
 target_compile_features(taskpp_common INTERFACE cxx_std_20)
 
+# --> third-party deps (static, built from source, never modified).
+set(CARES_STATIC ON CACHE BOOL "" FORCE)
+set(CARES_SHARED OFF CACHE BOOL "" FORCE)
+set(CARES_STATIC_PIC ON CACHE BOOL "" FORCE)
+set(CARES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CARES_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/c-ares)
+
 # --> modules (modules/<name>), each produces `taskpp::<name>`.
-set(TASKPP_MODULES core)
+set(TASKPP_MODULES core socket)
 foreach (module IN LISTS TASKPP_MODULES)
     add_subdirectory(modules/${module})
 endforeach()

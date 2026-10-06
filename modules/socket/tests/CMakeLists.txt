@@ -1,0 +1,5 @@
+add_executable(socket_SocketTests SocketTests.cpp)
+target_link_libraries(socket_SocketTests PRIVATE taskpp::socket)
+target_include_directories(socket_SocketTests PRIVATE ../../core/tests)
+add_test(NAME socket.SocketTests COMMAND socket_SocketTests)
+set_tests_properties(socket.SocketTests PROPERTIES TIMEOUT 60)
