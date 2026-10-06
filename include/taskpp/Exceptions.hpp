@@ -1,0 +1,20 @@
+#pragma once
+#include <stdexcept>
+
+namespace taskpp {
+
+/** Thrown when an operation is aborted by a `Canceller` (or by its owner). */
+class OperationCanceled : public std::runtime_error {
+public:
+    OperationCanceled() : std::runtime_error("the operation was canceled.") { }
+    using std::runtime_error::runtime_error;
+};
+
+/** Thrown when waiting on, or pushing to, a closed `AsyncQueue`. */
+class QueueClosed : public std::runtime_error {
+public:
+    QueueClosed() : std::runtime_error("the queue is closed.") { }
+    using std::runtime_error::runtime_error;
+};
+
+} // namespace taskpp
