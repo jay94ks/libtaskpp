@@ -31,7 +31,7 @@ struct Monitor::Impl {
 
     std::unique_ptr<MonitorBackend> backend;
     std::mutex mutex;
-    std::unordered_map<int, FdEntry> fds;
+    std::unordered_map<IoFd, FdEntry> fds;
     bool stopping = false;
     std::thread thread;
 
@@ -44,7 +44,7 @@ struct Monitor::Impl {
     }
 
     /** Syncs the backend with the entry's interest; may throw (e.g. EBADF / EPERM). */
-    void rearmLocked(int fd, FdEntry& entry) {
+    void rearmLocked(IoFd fd, FdEntry& entry) {
         const int wanted = interestOf(entry);
         if (wanted != entry.armed) {
             backend->update(fd, entry.armed, wanted);
@@ -194,30 +194,30 @@ Monitor& Monitor::defaultMonitor() {
     return *monitor;
 }
 
-IoWaitAwaitable Monitor::wait(int fd, int events, Canceller canceller) {
+IoWaitAwaitable Monitor::wait(IoFd fd, int events, Canceller canceller) {
     return defaultMonitor().watch(fd, events, std::move(canceller));
 }
 
-IoWhenAnyAwaitable Monitor::whenAny(std::span<const int> fds, int events, Canceller canceller) {
+IoWhenAnyAwaitable Monitor::whenAny(std::span<const IoFd> fds, int events, Canceller canceller) {
     return defaultMonitor().watchAny(fds, events, std::move(canceller));
 }
 
-IoWhenAnyAwaitable Monitor::whenAny(std::initializer_list<int> fds, int events, Canceller canceller) {
-    return defaultMonitor().watchAny(std::span<const int>(fds.begin(), fds.size()), events, std::move(canceller));
+IoWhenAnyAwaitable Monitor::whenAny(std::initializer_list<IoFd> fds, int events, Canceller canceller) {
+    return defaultMonitor().watchAny(std::span<const IoFd>(fds.begin(), fds.size()), events, std::move(canceller));
 }
 
 IoWhenAnyAwaitable Monitor::whenAny(std::vector<IoEventInfo> interests, Canceller canceller) {
     return defaultMonitor().watchAny(std::move(interests), std::move(canceller));
 }
 
-IoWaitAwaitable Monitor::watch(int fd, int events, Canceller canceller) {
+IoWaitAwaitable Monitor::watch(IoFd fd, int events, Canceller canceller) {
     return IoWaitAwaitable(*this, { IoEventInfo { fd, events } }, std::move(canceller));
 }
 
-IoWhenAnyAwaitable Monitor::watchAny(std::span<const int> fds, int events, Canceller canceller) {
+IoWhenAnyAwaitable Monitor::watchAny(std::span<const IoFd> fds, int events, Canceller canceller) {
     std::vector<IoEventInfo> interests;
     interests.reserve(fds.size());
-    for (int fd : fds) {
+    for (IoFd fd : fds) {
         interests.push_back({ fd, events });
     }
 
@@ -228,7 +228,7 @@ IoWhenAnyAwaitable Monitor::watchAny(std::vector<IoEventInfo> interests, Cancell
     return IoWhenAnyAwaitable(*this, std::move(interests), std::move(canceller));
 }
 
-void Monitor::cancel(int fd) {
+void Monitor::cancel(IoFd fd) {
     std::vector<detail::IoWaiter*> victims;
     {
         std::lock_guard lock(impl_->mutex);
@@ -289,6 +289,14 @@ void Monitor::abort(detail::IoWaiter* waiter) {
     waiter->completion.tryComplete([waiter] { waiter->aborted = true; });
 }
 
+void Monitor::detach(detail::IoWaiter* waiter) noexcept {
+    std::lock_guard lock(impl_->mutex);
+    if (!waiter->registered) {
+        return;
+    }
+    impl_->detachLocked(waiter);
+}
+
 // --------------------------------------------------------------------- awaitables
 
 namespace detail {
@@ -320,6 +328,15 @@ IoAwaitableBase::IoAwaitableBase(Monitor& monitor, std::vector<IoEventInfo> inte
         else {
             waiter_.interests.push_back({ interest.fd, events });
         }
+    }
+}
+
+IoAwaitableBase::~IoAwaitableBase() {
+    // Destroyed while still registered (e.g. the awaiting task was destroyed):
+    // detach without completing so the reactor never touches this waiter again.
+    // No resumption is queued because completion was never won.
+    if (waiter_.registered) {
+        monitor_->detach(&waiter_);
     }
 }
 

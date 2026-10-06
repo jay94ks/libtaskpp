@@ -17,4 +17,18 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+/** Thrown when sending to, or receiving from, a closed `Channel`. */
+class ChannelClosed : public QueueClosed {
+public:
+    ChannelClosed() : QueueClosed("the channel is closed.") { }
+    using QueueClosed::QueueClosed;
+};
+
+/** Thrown by `withTimeout` when the deadline expires first. */
+class Timeout : public OperationCanceled {
+public:
+    Timeout() : OperationCanceled("the operation timed out.") { }
+    using OperationCanceled::OperationCanceled;
+};
+
 } // namespace taskpp

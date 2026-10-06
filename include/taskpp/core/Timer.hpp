@@ -68,6 +68,14 @@ public:
     DelayAwaitable(const DelayAwaitable&) = delete;
     DelayAwaitable& operator=(const DelayAwaitable&) = delete;
 
+    ~DelayAwaitable() {
+        // Destroyed while still armed (e.g. the awaiting task was destroyed):
+        // drop the timer so its callback never touches this awaitable.
+        if (timerId_) {
+            TimerService::instance().cancel(timerId_);
+        }
+    }
+
     bool await_ready() const noexcept { return false; }
 
     bool await_suspend(std::coroutine_handle<> handle) {
@@ -97,6 +105,7 @@ public:
 
         if (timerId_) {
             TimerService::instance().cancel(timerId_);
+            timerId_ = 0;
         }
 
         if (canceled_) {

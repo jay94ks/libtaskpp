@@ -21,11 +21,13 @@ int main() {
 ## Layout
 
 ```
-include/taskpp          common headers (Config, TimeSpan, Exceptions, umbrella taskpp.hpp)
-modules/core            core module -> taskpp::core
-  include/taskpp/core     Task, Worker, ThreadedWorker, ThreadPooledWorker, Canceller,
-                          Timer (delay), AsyncQueue, Monitor, MonitorBackend
-  src/                    implementation (+ src/backends: epoll, poll)
+include/taskpp          global headers (all public API, `taskpp` namespace)
+  Config.hpp, TimeSpan.hpp, Exceptions.hpp, umbrella taskpp.hpp
+  core/                 core headers: Task, Worker, ThreadedWorker, ThreadPooledWorker,
+                        Canceller, Timer (delay, withTimeout), AsyncQueue, Channel,
+                        AsyncMutex, whenAll / whenAny, Monitor, MonitorBackend
+modules/core            core module sources -> taskpp::core
+  src/                    implementation (+ src/backends: epoll, poll, select/WSAPoll on Windows)
   tests/                  dependency-free unit tests (ctest)
 examples/               runnable samples
 docs/DESIGN.md          gap analysis and design decisions
@@ -75,8 +77,35 @@ Task<void> sampleForCanceller() {
 
 `Canceller` is the observer (`isTriggered`, `throwIfCanceled`, `onTriggered`),
 `CancellerSource` the owner (`trigger`, `cancelAfter`, linked to parent cancellers).
-Cancelable waits (`delay`, `AsyncQueue::wait`, `Monitor::wait/whenAny`) throw
-`OperationCanceled`.
+Cancelable waits (`delay`, `AsyncQueue::wait`, `Channel::send`/`receive`,
+`AsyncMutex::lock`, `Monitor::wait`/`whenAny`, `whenAll`/`whenAny`, `withTimeout`)
+throw `OperationCanceled`.
+
+### Combining tasks
+
+```cpp
+std::vector<int> v = co_await whenAll(tasks);          // vector<Task<T>> -> vector<T>, in order
+auto [a, b] = co_await whenAll(t1, t2);                // variadic -> tuple (void maps to monostate)
+auto first = co_await whenAny(tasks);                  // { index, value } of the first finisher
+int x = co_await withTimeout(task(), TimeSpan::fromSeconds(2));  // throws Timeout on expiry
+```
+
+Losers keep running in the background until they finish, so no suspended frame
+is destroyed mid-wait.
+
+### Mutexes and channels
+
+```cpp
+AsyncMutex m;
+{
+    auto guard = co_await m.lock(ct);   // FIFO, cancelable, worker affinity
+}
+
+Channel<int> ch(16);                    // bounded, back-pressure
+co_await ch.send(1, ct);                // suspends when full
+int item = co_await ch.receive(ct);     // suspends when empty
+ch.close();                             // receivers drain, then throw ChannelClosed
+```
 
 ### Workers
 
@@ -104,9 +133,12 @@ int e = co_await Monitor::wait(fd, FD_READ | FD_WRITE);              // ready fl
 std::vector<IoEventInfo> eves = co_await Monitor::whenAny({ a, b }, FD_READ);
 ```
 
-The reactor runs on its own thread over a pluggable `MonitorBackend`
-(epoll on Linux, poll on other POSIX systems). `FD_ERROR` / `FD_HANGUP` are
-always reported. See [docs/DESIGN.md](docs/DESIGN.md) for adding kqueue / IOCP.
+`IoFd` (`std::intptr_t`) holds a POSIX fd or a Windows `SOCKET`; plain `int`
+code converts implicitly. The reactor runs on its own thread over a pluggable
+`MonitorBackend` (epoll on Linux, poll on other POSIX systems, select over
+sockets on Windows — regular files/pipes stay POSIX-only).
+`FD_ERROR` / `FD_HANGUP` are always reported. See [docs/DESIGN.md](docs/DESIGN.md)
+for the Windows socket-only note and for adding kqueue / IOCP.
 
 ## License
 

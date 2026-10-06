@@ -47,9 +47,10 @@ public:
 
     const char* name() const noexcept override { return "epoll"; }
 
-    void update(int fd, int oldEvents, int newEvents) override {
+    void update(IoFd fd, int oldEvents, int newEvents) override {
+        const int native = static_cast<int>(fd);
         if (newEvents == 0) {
-            if (::epoll_ctl(epoll_, EPOLL_CTL_DEL, fd, nullptr) < 0 && errno != ENOENT && errno != EBADF) {
+            if (::epoll_ctl(epoll_, EPOLL_CTL_DEL, native, nullptr) < 0 && errno != ENOENT && errno != EBADF) {
                 throw lastError("epoll_ctl(DEL)");
             }
             return;
@@ -57,10 +58,10 @@ public:
 
         epoll_event ev { };
         ev.events = toEpoll(newEvents);
-        ev.data.fd = fd;
+        ev.data.fd = native;
 
         int op = oldEvents ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-        if (::epoll_ctl(epoll_, op, fd, &ev) == 0) {
+        if (::epoll_ctl(epoll_, op, native, &ev) == 0) {
             return;
         }
 
@@ -75,7 +76,7 @@ public:
             throw lastError("epoll_ctl");
         }
 
-        if (::epoll_ctl(epoll_, op, fd, &ev) < 0) {
+        if (::epoll_ctl(epoll_, op, native, &ev) < 0) {
             throw lastError("epoll_ctl");
         }
     }

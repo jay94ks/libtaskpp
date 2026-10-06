@@ -3,9 +3,12 @@ set(TASKPP_CORE_TESTS
     WorkerTests
     CancellerTests
     AsyncQueueTests
+    WhenAllTests
+    AsyncMutexTests
+    ChannelTests
 )
 
-if (UNIX)
+if (UNIX OR WIN32)
     list(APPEND TASKPP_CORE_TESTS MonitorTests)
 endif()
 

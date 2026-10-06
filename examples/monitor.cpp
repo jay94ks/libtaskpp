@@ -24,7 +24,7 @@ Task<void> reader(int a, int b) {
 
     std::vector<IoEventInfo> eves = co_await Monitor::whenAny({ a, b }, FD_READ, timeout.canceller);
     for (auto& info : eves) {
-        std::printf("fd %d ready (events %d), is b: %s\n", info.fd, info.e, info.fd == b ? "yes" : "no");
+        std::printf("fd %ld ready (events %d), is b: %s\n", static_cast<long>(info.fd), info.e, info.fd == b ? "yes" : "no");
     }
 }
 

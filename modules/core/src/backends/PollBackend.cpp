@@ -37,7 +37,7 @@ public:
 
     const char* name() const noexcept override { return "poll"; }
 
-    void update(int fd, int /*oldEvents*/, int newEvents) override {
+    void update(IoFd fd, int /*oldEvents*/, int newEvents) override {
         {
             std::lock_guard lock(mutex_);
             if (newEvents) {
@@ -60,7 +60,7 @@ public:
                 short flags = 0;
                 if (events & IoRead) flags |= POLLIN | POLLPRI;
                 if (events & IoWrite) flags |= POLLOUT;
-                pollfds_.push_back({ fd, flags, 0 });
+                pollfds_.push_back({ static_cast<int>(fd), flags, 0 });
             }
         }
 
@@ -100,7 +100,7 @@ public:
 private:
     int pipe_[2] { -1, -1 };
     std::mutex mutex_;
-    std::unordered_map<int, int> interest_;
+    std::unordered_map<IoFd, int> interest_;
     std::vector<pollfd> pollfds_;   // only touched by the monitor thread.
 };
 

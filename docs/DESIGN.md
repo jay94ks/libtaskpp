@@ -8,7 +8,7 @@ resolved in the implementation.
 
 | Spec | Gap | Resolution |
 |---|---|---|
-| `include/taskpp` = common headers, `modules/core` = core | Where module headers live, and how modules are built and consumed, is not specified. | `include/taskpp` holds only module-independent headers (`Config.hpp`, `TimeSpan.hpp`, `Exceptions.hpp`, the umbrella `taskpp.hpp`) behind the `taskpp::common` INTERFACE target. Each module `modules/<m>` has its own `include/taskpp/<m>/`, `src/`, `tests/` and produces `taskpp::<m>`. A new module is one directory plus one entry in `TASKPP_MODULES`. |
+| `include/taskpp` = common headers, `modules/core` = core | Where module headers live, and how modules are built and consumed, is not specified. | `include/taskpp` holds every public header (`Config.hpp`, `TimeSpan.hpp`, `Exceptions.hpp`, the umbrella `taskpp.hpp`, plus `core/` with all core headers) behind the `taskpp::common` / `taskpp::core` INTERFACE include paths. Each module `modules/<m>` now holds only `src/`, `tests/` and produces `taskpp::<m>`. A new module is one directory plus one entry in `TASKPP_MODULES`. |
 
 ## 2. Task
 
@@ -56,11 +56,11 @@ same interface.
 |---|---|
 | `FD_READ` / `FD_WRITE` collide with `<winsock2.h>` macros | Canonical names are `IoRead`, `IoWrite`, `IoError` and `IoHangup`. The `FD_*` constants are defined only if they are not already macros. The values match winsock's (1, 2). |
 | Return value of `wait` | The ready flags (`int`). Errors and hangups are always reported, even when not requested. |
-| Semantics of `whenAny` | Completes as soon as at least one descriptor is ready, and returns **every** descriptor found ready in that poll cycle (duplicate fds are merged). Overloads accept `std::span<const int>`, an initializer list, or `std::vector<IoEventInfo>` for a different interest per fd. |
+| Semantics of `whenAny` | Completes as soon as at least one descriptor is ready, and returns **every** descriptor found ready in that poll cycle (duplicate fds are merged). Overloads accept `std::span<const IoFd>`, an initializer list, or `std::vector<IoEventInfo>` for a different interest per fd. |
 | Several coroutines waiting on the same fd | The monitor keeps a registration list per fd and arms the backend with the union of their interests. Each waiter only receives the events it asked for. |
 | Closing an fd while waiting on it | `Monitor::cancel(fd)` aborts every wait on it (`OperationCanceled`). Call it before `close()`. |
 | One-shot vs persistent | Waits are one-shot. The backend is level-triggered, and each fd is re-armed with whatever interest remains, so there is no busy loop and no lost wakeup. |
-| Extensibility (epoll, IOCP, ...) | `MonitorBackend` provides `update(fd, old, new)`, `poll(out, timeout)` and `wakeup()`. Shipped backends are `epoll` (Linux, eventfd wakeup) and `poll` (POSIX, self-pipe). You can construct a `Monitor` with any backend, and the static `Monitor::wait/whenAny` helpers use the process-wide `defaultMonitor()`. |
+| Extensibility (epoll, IOCP, ...) | `MonitorBackend` provides `update(fd, old, new)`, `poll(out, timeout)` and `wakeup()`. Shipped backends are `epoll` (Linux, eventfd wakeup), `poll` (POSIX, self-pipe) and `select` (Windows, sockets only, loopback-TCP wakeup). Descriptors are `IoFd` (`std::intptr_t`: a POSIX fd or a Windows `SOCKET`; `int` converts implicitly). You can construct a `Monitor` with any backend, and the static `Monitor::wait/whenAny` helpers use the process-wide `defaultMonitor()`. |
 
 ### Adding kqueue / IOCP
 
@@ -68,8 +68,9 @@ same interface.
   on `EVFILT_READ`/`EVFILT_WRITE`, and `wakeup` maps to `EVFILT_USER`.
 * **IOCP** is completion based, not readiness based. There are two options:
   1. Keep the readiness model on Windows through a socket-only backend
-     (`WSAPoll`, or AFD polling as done by wepoll/mio) behind `MonitorBackend`.
-     The `Monitor` API does not change.
+     (shipped: `select()` over Winsock; `WSAPoll` or AFD polling as done by
+     wepoll/mio are alternatives) behind `MonitorBackend`.
+     The `Monitor` API is unchanged apart from the widened `IoFd` descriptor type.
   2. Add a completion-based `IoService` module next to `Monitor`
      (`co_await socket.read(buffer)`) that issues overlapped operations. One
      IOCP thread dequeues completions and posts the resumption through the same
@@ -79,15 +80,45 @@ same interface.
 
 ## 6. Missing primitives that the samples rely on
 
-* `TimeSpan` (`TimeSpan::fromSeconds(5)`) is in common `include/taskpp`.
+* `TimeSpan` (`TimeSpan::fromSeconds(5)`) is in global `include/taskpp`.
 * `queue.wait()` is provided by `AsyncQueue<T>` (MPMC, FIFO waiters, cancelable, `close()`).
+* Bounded back-pressure channels: `Channel<T>(capacity)` (`send`/`receive`, `trySend`/`tryReceive`, `close()`).
+* `AsyncMutex` (`lock(ct)` -> RAII `ScopedLock`, FIFO, cancelable, `tryLock()`).
+* Task combinators: `whenAll` (vector + variadic tuple), `whenAny` (vector + variadic variant), `withTimeout`.
 * `delay(TimeSpan, Canceller)`.
-* `OperationCanceled` and `QueueClosed` exceptions.
+* `OperationCanceled`, `QueueClosed`, `ChannelClosed` (derives from `QueueClosed`) and `Timeout` (derives from `OperationCanceled`) exceptions.
 
-## 7. Known limitations / future work
+## 7. Known limitations / future work (all implemented)
 
 * `whenAll` / `whenAny` combinators over tasks, an async mutex, and channels with
-  back-pressure are not implemented.
-* The monitor is POSIX-only for now (see §5 for the Windows plan).
-* A wait that is never completed (no event and no canceller) keeps its coroutine
-  frame alive forever, the same as an unfinished `std::future`.
+  back-pressure are implemented in `taskpp::core` (`WhenAll.hpp`, `AsyncMutex.hpp`,
+  `Channel.hpp`, all in the `taskpp` namespace and re-exported by `Core.hpp` /
+  `taskpp.hpp`):
+  * `whenAll(vector<Task<T>>) -> Task<vector<T>>`, `whenAll(vector<Task<void>>)`,
+    variadic `whenAll(Task<Ts>...) -> Task<tuple<...>>` (`void` maps to
+    `std::monostate`), plus `whenAllWithCanceller`.
+  * `whenAny(vector<Task<T>>) -> Task<WhenAnyResult<T>>` (`{index, value}`),
+    `whenAny(vector<Task<void>>) -> Task<size_t>`, variadic
+    `whenAny(Task<Ts>...) -> Task<variant<...>>` (`variant::index()` is the winner),
+    plus `whenAnyWithCanceller`. Losers keep running in the background until they
+    finish so no suspended frame is destroyed mid-wait.
+  * `AsyncMutex` (`co_await m.lock(ct)` -> RAII `ScopedLock`, FIFO, cancelable,
+    `tryLock()`, worker affinity via `detail::Completion`).
+  * `Channel<T>(capacity)` with back-pressure (`co_await send/recv`, `trySend` /
+    `tryReceive`, `close()`, `ChannelClosed` which derives from `QueueClosed`).
+* The monitor builds on Windows over a socket-only `select()` backend
+  (`WsaPollBackend.cpp`, `MonitorBackend::createWsaPoll()`, backend name
+  `"select"`; §5 option 1). `IoFd` (`std::intptr_t`) holds a POSIX fd or a Windows
+  `SOCKET`; existing `int` code converts implicitly. Regular files/pipes remain
+  POSIX-only; on Windows only sockets are pollable.
+* A wait that is never completed (no event and no canceller) is still owned by its
+  `Task`, like an unfinished `std::future`, but three mitigations exist:
+  * `withTimeout(task, span, ct) -> Task<T>` races any task against a deadline and
+    throws `Timeout` (derives from `OperationCanceled`, so existing handlers work).
+    The loser runs in the background until it finishes.
+  * Destroying a task suspended on `delay` / `AsyncQueue` / `Channel` / `AsyncMutex` /
+    `Monitor` / combinators is safe: awaitables unlink/cancel in their
+    destructors and never resume a destroyed frame (a resumption already queued on
+    a worker before destruction remains a user-side race, as with any executor).
+  * Guidance: always pass a `Canceller` (`cancelAfter` / `withTimeout`) to waits
+    that might never complete.

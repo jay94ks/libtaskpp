@@ -6,15 +6,112 @@
 #include <chrono>
 #include <thread>
 
+#if defined(TASKPP_PLATFORM_WINDOWS) && !defined(TASKPP_PLATFORM_POSIX)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 
 using namespace taskpp;
 
 namespace {
 
+#if defined(TASKPP_PLATFORM_WINDOWS) && !defined(TASKPP_PLATFORM_POSIX)
+
+struct WsaScope {
+    WsaScope() {
+        WSADATA data { };
+        if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+            throw std::runtime_error("WSAStartup");
+        }
+    }
+    ~WsaScope() { ::WSACleanup(); }
+};
+
+// Loopback TCP pair: reader/writer sockets for tests (sockets only on Windows).
 struct Pipe {
-    int r = -1, w = -1;
+    IoFd r = -1, w = -1;
+    SOCKET listener = INVALID_SOCKET;
+
+    Pipe() {
+        static WsaScope scope;
+        (void) scope;
+        listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listener == INVALID_SOCKET) {
+            throw std::runtime_error("socket");
+        }
+        sockaddr_in addr { };
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR ||
+            ::listen(listener, 1) == SOCKET_ERROR) {
+            ::closesocket(listener);
+            throw std::runtime_error("bind/listen");
+        }
+        int len = sizeof(addr);
+        ::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &len);
+        SOCKET writer = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (writer == INVALID_SOCKET) {
+            ::closesocket(listener);
+            throw std::runtime_error("socket");
+        }
+        if (::connect(writer, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+            ::closesocket(writer);
+            ::closesocket(listener);
+            throw std::runtime_error("connect");
+        }
+        SOCKET reader = ::accept(listener, nullptr, nullptr);
+        if (reader == INVALID_SOCKET) {
+            ::closesocket(writer);
+            ::closesocket(listener);
+            throw std::runtime_error("accept");
+        }
+        u_long on = 1;
+        ::ioctlsocket(reader, FIONBIO, &on);
+        ::ioctlsocket(writer, FIONBIO, &on);
+        r = static_cast<IoFd>(reader);
+        w = static_cast<IoFd>(writer);
+    }
+
+    ~Pipe() {
+        if (r >= 0) {
+            ::closesocket(static_cast<SOCKET>(r));
+        }
+        if (w >= 0) {
+            ::closesocket(static_cast<SOCKET>(w));
+        }
+        if (listener != INVALID_SOCKET) {
+            ::closesocket(listener);
+        }
+    }
+
+    void write(char c = 'x') const {
+        ::send(static_cast<SOCKET>(w), &c, 1, 0);
+    }
+
+    int readSome(char* buffer, int size) const {
+        return ::recv(static_cast<SOCKET>(r), buffer, size, 0);
+    }
+
+    void closeWriter() {
+        if (w >= 0) {
+            ::closesocket(static_cast<SOCKET>(w));
+            w = -1;
+        }
+    }
+};
+
+#else
+
+struct Pipe {
+    IoFd r = -1, w = -1;
 
     Pipe() {
         int fds[2];
@@ -23,33 +120,50 @@ struct Pipe {
         }
         r = fds[0];
         w = fds[1];
-        ::fcntl(r, F_SETFL, O_NONBLOCK);
-        ::fcntl(w, F_SETFL, O_NONBLOCK);
+        ::fcntl(static_cast<int>(r), F_SETFL, O_NONBLOCK);
+        ::fcntl(static_cast<int>(w), F_SETFL, O_NONBLOCK);
     }
 
     ~Pipe() {
-        if (r >= 0) ::close(r);
-        if (w >= 0) ::close(w);
+        if (r >= 0) {
+            ::close(static_cast<int>(r));
+        }
+        if (w >= 0) {
+            ::close(static_cast<int>(w));
+        }
     }
 
-    void write(char c = 'x') const { [[maybe_unused]] auto n = ::write(w, &c, 1); }
+    void write(char c = 'x') const { [[maybe_unused]] auto n = ::write(static_cast<int>(w), &c, 1); }
+
+    int readSome(char* buffer, int size) const {
+        return static_cast<int>(::read(static_cast<int>(r), buffer, static_cast<std::size_t>(size)));
+    }
+
+    void closeWriter() {
+        if (w >= 0) {
+            ::close(static_cast<int>(w));
+            w = -1;
+        }
+    }
 };
 
-Task<int> waitReadable(Monitor* monitor, int fd, Canceller ct) {
+#endif
+
+Task<int> waitReadable(Monitor* monitor, IoFd fd, Canceller ct) {
     int e = co_await monitor->watch(fd, FD_READ, ct);
     co_return e;
 }
 
-Task<std::vector<IoEventInfo>> waitAny(Monitor* monitor, std::vector<int> fds) {
+Task<std::vector<IoEventInfo>> waitAny(Monitor* monitor, std::vector<IoFd> fds) {
     co_return co_await monitor->watchAny(fds, FD_READ);
 }
 
-Task<long> echoLoop(Monitor* monitor, int fd, int expected) {
+Task<long> echoLoop(Monitor* monitor, const Pipe* pipe, int expected) {
     long received = 0;
     while (received < expected) {
-        co_await monitor->watch(fd, FD_READ);
+        co_await monitor->watch(pipe->r, FD_READ);
         char buffer[256];
-        auto n = ::read(fd, buffer, sizeof(buffer));
+        auto n = pipe->readSome(buffer, sizeof(buffer));
         if (n > 0) {
             received += n;
         }
@@ -57,7 +171,7 @@ Task<long> echoLoop(Monitor* monitor, int fd, int expected) {
     co_return received;
 }
 
-Task<bool> resumesOnSameWorker(Monitor* monitor, int fd) {
+Task<bool> resumesOnSameWorker(Monitor* monitor, IoFd fd) {
     auto before = Worker::currentWorker();
     co_await monitor->watch(fd, FD_READ);
     co_return before && before == Worker::currentWorker();
@@ -69,14 +183,30 @@ std::unique_ptr<MonitorBackend> makeBackend(const std::string& name) {
         return MonitorBackend::createEpoll();
     }
 #endif
-    return MonitorBackend::createPoll();
+#if defined(TASKPP_PLATFORM_POSIX)
+    if (name == "poll") {
+        return MonitorBackend::createPoll();
+    }
+#endif
+#if defined(TASKPP_PLATFORM_WINDOWS)
+    (void) name;
+    return MonitorBackend::createWsaPoll();
+#else
+    (void) name;
+    return MonitorBackend::createDefault();
+#endif
 }
 
 void forEachBackend(const std::function<void(Monitor&)>& body) {
+#if defined(TASKPP_PLATFORM_WINDOWS) && !defined(TASKPP_PLATFORM_POSIX)
+    Monitor monitor(MonitorBackend::createWsaPoll());
+    body(monitor);
+#else
     for (const char* name : { "epoll", "poll" }) {
         Monitor monitor(makeBackend(name));
         body(monitor);
     }
+#endif
 }
 
 } // namespace
@@ -123,13 +253,24 @@ TEST(when_any) {
 }
 
 TEST(hangup_is_reported) {
+#if defined(TASKPP_PLATFORM_WINDOWS) && !defined(TASKPP_PLATFORM_POSIX)
+    // TCP hangup reporting differs; writer shutdown still yields readability.
     forEachBackend([](Monitor& monitor) {
         auto w = std::make_shared<ThreadedWorker>();
         Pipe p;
-        ::close(p.w);
+        p.closeWriter();
+        ::shutdown(static_cast<SOCKET>(p.r), SD_BOTH);
+        CHECK(w->sync_wait(waitReadable(&monitor, p.r, { })) & (FD_READ | FD_HANGUP));
+    });
+#else
+    forEachBackend([](Monitor& monitor) {
+        auto w = std::make_shared<ThreadedWorker>();
+        Pipe p;
+        ::close(static_cast<int>(p.w));
         p.w = -1;
         CHECK(w->sync_wait(waitReadable(&monitor, p.r, { })) & FD_HANGUP);
     });
+#endif
 }
 
 TEST(wait_cancellation) {
@@ -176,7 +317,7 @@ TEST(streaming_and_affinity) {
             }
         });
 
-        CHECK(w->sync_wait(echoLoop(&monitor, p.r, 2000)) == 2000);
+        CHECK(w->sync_wait(echoLoop(&monitor, &p, 2000)) == 2000);
         writer.join();
 
         Pipe q;
@@ -192,7 +333,7 @@ TEST(many_concurrent_waiters_on_one_fd) {
         std::atomic<int> woke { 0 };
 
         for (int i = 0; i < 50; ++i) {
-            w->push([](Monitor* m, int fd, std::atomic<int>* woke) -> Task<void> {
+            w->push([](Monitor* m, IoFd fd, std::atomic<int>* woke) -> Task<void> {
                 co_await m->watch(fd, FD_READ);
                 woke->fetch_add(1);
             }(&monitor, p.r, &woke));
@@ -216,7 +357,7 @@ TEST(default_monitor_static_api) {
     Pipe p;
     p.write();
     CHECK(Monitor::defaultMonitor().backendName() != nullptr);
-    const int e = w->sync_wait([](int fd) -> Task<int> {
+    const int e = w->sync_wait([](IoFd fd) -> Task<int> {
         co_return co_await Monitor::wait(fd, FD_READ | FD_WRITE);
     }(p.r));
     CHECK(e & FD_READ);

@@ -16,8 +16,15 @@ if (UNIX)
     endif()
 endif()
 
+if (WIN32 AND NOT UNIX)
+    target_sources(taskpp_core PRIVATE
+        src/Monitor.cpp
+        src/backends/WsaPollBackend.cpp)
+    target_link_libraries(taskpp_core PUBLIC ws2_32)
+endif()
+
 target_include_directories(taskpp_core PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(taskpp_core PUBLIC taskpp::common Threads::Threads)
 

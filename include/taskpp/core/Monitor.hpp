@@ -34,7 +34,7 @@ public:
 
 protected:
     IoAwaitableBase(Monitor& monitor, std::vector<IoEventInfo> interests, Canceller canceller);
-    ~IoAwaitableBase() = default;
+    ~IoAwaitableBase();
 
     /** Disarms and throws `OperationCanceled` if aborted; returns the ready set. */
     std::vector<IoEventInfo>& finish();
@@ -73,14 +73,16 @@ private:
 /**
  * Asynchronous I/O readiness monitor (a reactor).
  *
- * One monitor thread waits on a `MonitorBackend` (epoll / poll / ...); a ready
- * descriptor resumes its waiting coroutines *on the worker they suspended on*.
- * Waits are one-shot: after it resumes, issue a new wait for the next event.
+ * One monitor thread waits on a `MonitorBackend` (epoll / poll / WSAPoll / ...);
+ * a ready descriptor resumes its waiting coroutines *on the worker they
+ * suspended on*. Waits are one-shot: after it resumes, issue a new wait.
  *
  * - Several coroutines may wait on the same descriptor (e.g. one reading, one writing).
  * - `IoError` / `IoHangup` are always reported, whatever was requested.
  * - Descriptors should be non-blocking; readiness is a hint, not a guarantee.
  * - Do not close a descriptor while waiting on it: call `cancel(fd)` first.
+ *   Destroying a suspended wait detaches it safely (no resumption).
+ * - POSIX: any pollable fd. Windows: sockets only (`WSAPoll` backend).
  */
 class Monitor {
 public:
@@ -94,18 +96,18 @@ public:
     static Monitor& defaultMonitor();
 
     // --> static helpers on the default monitor.
-    static IoWaitAwaitable wait(int fd, int events, Canceller canceller = { });
-    static IoWhenAnyAwaitable whenAny(std::span<const int> fds, int events, Canceller canceller = { });
-    static IoWhenAnyAwaitable whenAny(std::initializer_list<int> fds, int events, Canceller canceller = { });
+    static IoWaitAwaitable wait(IoFd fd, int events, Canceller canceller = { });
+    static IoWhenAnyAwaitable whenAny(std::span<const IoFd> fds, int events, Canceller canceller = { });
+    static IoWhenAnyAwaitable whenAny(std::initializer_list<IoFd> fds, int events, Canceller canceller = { });
     static IoWhenAnyAwaitable whenAny(std::vector<IoEventInfo> interests, Canceller canceller = { });
 
     // --> the same on this monitor.
-    IoWaitAwaitable watch(int fd, int events, Canceller canceller = { });
-    IoWhenAnyAwaitable watchAny(std::span<const int> fds, int events, Canceller canceller = { });
+    IoWaitAwaitable watch(IoFd fd, int events, Canceller canceller = { });
+    IoWhenAnyAwaitable watchAny(std::span<const IoFd> fds, int events, Canceller canceller = { });
     IoWhenAnyAwaitable watchAny(std::vector<IoEventInfo> interests, Canceller canceller = { });
 
     /** Aborts every wait involving `fd` (they throw `OperationCanceled`). */
-    void cancel(int fd);
+    void cancel(IoFd fd);
 
     const char* backendName() const noexcept;
 
@@ -115,6 +117,7 @@ private:
 
     void attach(detail::IoWaiter* waiter);
     void abort(detail::IoWaiter* waiter);
+    void detach(detail::IoWaiter* waiter) noexcept;
 
     std::unique_ptr<Impl> impl_;
 };

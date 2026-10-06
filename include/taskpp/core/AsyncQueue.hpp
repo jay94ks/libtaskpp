@@ -51,6 +51,18 @@ public:
         WaitAwaitable(const WaitAwaitable&) = delete;
         WaitAwaitable& operator=(const WaitAwaitable&) = delete;
 
+        ~WaitAwaitable() {
+            // Destroyed while still queued: unlink so push()/close() never
+            // touches this waiter after its frame is gone.
+            if (waiter_.linked) {
+                std::lock_guard lock(state_->mutex);
+                if (waiter_.linked) {
+                    state_->waiters.erase(waiter_.position);
+                    waiter_.linked = false;
+                }
+            }
+        }
+
         bool await_ready() const noexcept { return false; }
 
         bool await_suspend(std::coroutine_handle<> handle) {
