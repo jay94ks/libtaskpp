@@ -1,5 +1,6 @@
 add_library(taskpp_core
     src/Canceller.cpp
+    src/Stream.cpp
     src/ThreadGroup.cpp
     src/Timer.cpp
     src/Worker.cpp

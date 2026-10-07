@@ -8,3 +8,6 @@ endif()
 
 add_executable(example_socket_echo socket_echo.cpp)
 target_link_libraries(example_socket_echo PRIVATE taskpp::taskpp)
+
+add_executable(example_tls_probe tls_probe.cpp)
+target_link_libraries(example_tls_probe PRIVATE taskpp::taskpp)

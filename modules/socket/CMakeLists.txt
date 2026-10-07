@@ -2,6 +2,7 @@ add_library(taskpp_socket
     src/Dns.cpp
     src/Socket.cpp
     src/SocketAddress.cpp
+    src/SocketStream.cpp
 )
 add_library(taskpp::socket ALIAS taskpp_socket)
 

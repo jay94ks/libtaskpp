@@ -32,8 +32,18 @@ set(CARES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CARES_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/c-ares)
 
+set(CERTPP_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(CERTPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CERTPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/libcertpp)
+
+option(TASKPP_BUILD_HTTP "Build libtaskpp http module" ${PROJECT_IS_TOP_LEVEL})
+
 # --> modules (modules/<name>), each produces `taskpp::<name>`.
-set(TASKPP_MODULES core socket)
+set(TASKPP_MODULES core socket tls)
+if (TASKPP_BUILD_HTTP)
+    list(APPEND TASKPP_MODULES http)
+endif()
 foreach (module IN LISTS TASKPP_MODULES)
     add_subdirectory(modules/${module})
 endforeach()

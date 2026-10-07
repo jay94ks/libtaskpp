@@ -8,3 +8,11 @@
 
 #include <taskpp/core/Core.hpp>
 #include <taskpp/socket/Socket.hpp>
+
+#if defined(TASKPP_WITH_TLS)
+#include <taskpp/tls/Tls.hpp>
+#endif
+
+#if defined(TASKPP_WITH_HTTP)
+#include <taskpp/http/Http.hpp>
+#endif

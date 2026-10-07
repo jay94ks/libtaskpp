@@ -304,4 +304,13 @@ private:
     std::shared_ptr<detail::TaskTracker> tracker_;
 };
 
+/**
+ * `co_await yield();` — free-function spelling of `Worker::yield()` for
+ * symmetry with `delay()`. Gives other tasks of the current worker a chance
+ * to run; resumes on the same worker.
+ */
+inline Worker::ScheduleAwaitable yield() {
+    return Worker::yield();
+}
+
 } // namespace taskpp

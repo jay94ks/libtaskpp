@@ -1,0 +1,11 @@
+add_executable(http_HttpTests HttpTests.cpp)
+target_link_libraries(http_HttpTests PRIVATE taskpp::http)
+target_include_directories(http_HttpTests PRIVATE ../../core/tests)
+add_test(NAME http.HttpTests COMMAND http_HttpTests)
+set_tests_properties(http.HttpTests PROPERTIES TIMEOUT 120)
+
+add_executable(http_H2Tests H2Tests.cpp)
+target_link_libraries(http_H2Tests PRIVATE taskpp::http)
+target_include_directories(http_H2Tests PRIVATE ../../core/tests ../../tls/tests)
+add_test(NAME http.H2Tests COMMAND http_H2Tests)
+set_tests_properties(http.H2Tests PROPERTIES TIMEOUT 180)

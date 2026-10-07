@@ -9,6 +9,7 @@ resolved in the implementation.
 | Spec | Gap | Resolution |
 |---|---|---|
 | `include/taskpp` = common headers, `modules/core` = core | Where module headers live, and how modules are built and consumed, is not specified. | `include/taskpp` holds every public header (`Config.hpp`, `TimeSpan.hpp`, `Exceptions.hpp`, the umbrella `taskpp.hpp`, plus `core/` with all core headers) behind the `taskpp::common` / `taskpp::core` INTERFACE include paths. Each module `modules/<m>` now holds only `src/`, `tests/` and produces `taskpp::<m>`. A new module is one directory plus one entry in `TASKPP_MODULES`. |
+| TLS has nothing to do with HTTP, yet lived in the `http` module | `taskpp::http::TlsStream` forced anything that only wanted encryption to pull in the whole HTTP stack. | TLS is its own module `modules/tls` producing `taskpp::tls`, depending only on `core` + `socket`. The shared `Stream` abstraction sits in `core`; `SocketStream` sits in `socket`. `http` depends on `tls` and re-uses it through `<taskpp/tls/Tls.hpp>`. |
 
 ## 2. Task
 
@@ -122,3 +123,116 @@ same interface.
     a worker before destruction remains a user-side race, as with any executor).
   * Guidance: always pass a `Canceller` (`cancelAfter` / `withTimeout`) to waits
     that might never complete.
+
+## 8. TLS module
+
+TLS was split out of `http` into its own `tls` module (`taskpp::tls`) so that it
+depends only on `core` + `socket`, not on HTTP. The `Stream` abstraction lives
+in `core` (`Stream`, transport independent); `SocketStream` lives in `socket`
+because it binds the abstraction to sockets. `http` depends on `tls`.
+
+Design points that are easy to get wrong and are called out here because they
+were verified against OpenSSL, not just against our own tests:
+
+* **PSK binder (RFC 8446 4.2.11.2).** The binder is
+  `HMAC(finished_key, Hash(truncated ClientHello))` where
+  `finished_key = HKDF-Expand-Label(binder_key, "finished", "", 32)`. Using the
+  binder key directly "works" between our own client and server and fails with
+  every other implementation. The truncated message ends after the
+  `identities` field, but **all length fields keep their full values** -- only
+  the binder bytes are omitted.
+* **Record version.** `legacy_record_version` must be 0x0303 everywhere except
+  the initial ClientHello, where 0x0301 is allowed (RFC 8446 5.1). OpenSSL
+  sends 0x0301 there, so the check is relaxed only while no keys exist.
+* **Unknown extensions must be ignored**, not rejected: a strict `e.end()` on
+  every extension makes us reject OpenSSL's ClientHello outright.
+* **Resumption PSK derivation.** The ticket binds the *resumption master
+  secret* and the ticket nonce; the PSK is
+  `HKDF-Expand-Label(res_master, "resumption", ticket_nonce, 32)` on both
+  sides. Storing a fresh random PSK in the ticket makes the client's derived
+  PSK differ from the server's.
+* **`txEncrypted` starts right after the ServerHello** (RFC 8446 4.1.3), not at
+  Finished -- otherwise a mutual-TLS client sends its Certificate and
+  CertificateVerify in the clear.
+* **HelloRetryRequest** resets the transcript to the synthetic `message_hash`
+  message. A retry drops any offered PSK (its binder no longer applies).
+* The session `Finished` key (`res master`) is computed over the transcript
+  through the *client* Finished; both sides derive the resumption PSK from that
+  single value, so no per-session server state is needed.
+
+## 9. HTTP/2 client concurrency
+
+The client is multiplexed by a single reader pump that owns every inbound
+frame, so `H2Connection::request` can be called concurrently. Three invariants
+make it work, and each was a real bug found by testing:
+
+* **Encode order, id order and wire order must be the same sequence.** HPACK is
+  sequential and RFC 9113 5.1.1 requires request streams to open with strictly
+  increasing ids. Assigning the stream id in a separate critical section from
+  the HPACK encoding lets two callers encode in one order and write in another,
+  which corrupts the peer's dynamic table and silently drops streams. All three
+  now happen under `codecLock` then `writeLock`, always in that order.
+* **Never hold the wire lock while parked on flow control.** The pump needs the
+  same lock to send WINDOW_UPDATEs, PING and SETTINGS acknowledgements, so
+  `sendData` releases it before waiting for credit.
+* **CONTINUATION frames are assembled in the pump**, not in the per-stream
+  consumer: otherwise a header block split across frames would let the pump read
+  a frame belonging to another stream in the middle of the block.
+* Server push is declined via `SETTINGS_ENABLE_PUSH = 0` plus
+  `RST_STREAM(CANCEL)` on any `PUSH_PROMISE` that arrives anyway (RFC 9113
+  8.4); the promise is still reported through `pushPromises()`.
+* GOAWAY is honoured: streams above `last_stream_id` are reported as
+  `REFUSED_STREAM` (retryable on a fresh connection) and no new request is sent
+  afterwards.
+
+## 10. Message bodies: pipes, forms, JSON
+
+`HttpRequest` and `HttpResponse` used to carry a bare `std::string body`, which
+forced a large payload to be materialised and made every content type the
+caller's problem. They now share a `HttpMessage` base holding `Headers` and a
+`Body`, and H2's request/response types derive from it too, so one set of
+codecs works over both protocols.
+
+* **`Body` is either bytes or a pipe.** `Body::fromPipe(fn)` takes
+  `Task<std::optional<Chunk>>(Canceller)`: return the next chunk, `nullopt`
+  when finished. A pipe has no known length, so HTTP/1.1 sends
+  `Transfer-Encoding: chunked` and HTTP/2 one DATA frame per chunk. Both
+  directions need one chunk of lookahead so `END_STREAM` lands on the final
+  frame; the HTTP/2 path originally never sent it and hung the peer, which is
+  why the pipe tests assert the exact reassembled bytes.
+* **The narrowing constructors of `Body` are explicit.** With an implicit
+  `std::string` -> `Body` conversion, `body == "text"` is ambiguous between
+  `operator==(const Body&)` and `operator==(std::string_view)`. Assignment
+  operators keep `message.body = "text"` ergonomic without the ambiguity.
+* **The readers are coroutines.** `toJson()`, `toForm()`, `toUrlEncodedForm()`
+  and `toText()` all return `Task<...>` and drain a pipe body themselves.
+  Making them synchronous and throwing "body is a pipe" was wrong: it forced
+  every caller to branch on whether the body happened to be buffered, for no
+  gain, since `Body::collect()` already suspends. A buffered body returns
+  without suspending, so the async form is free. `HttpRequest::formField()`
+  follows the same rule.
+* **`trim` must eat `\r`.** Multipart headers are split on `\n`, so every line
+  keeps its CR; without this, `filename` came back as `"a.txt"` *with the
+  quotes and a trailing CR* instead of `a.txt`.
+* **Urlencoding follows the WHATWG byte set** (`*-._` and alphanumerics stay
+  literal, space becomes `+`, everything else is `%XX`), which is what HTML
+  forms and every server-side decoder expect.
+* **`std::from_chars` for integers.** `strtoll` reports `ERANGE` for exactly
+  `INT64_MAX` on MSVC, so `9223372036854775807` silently degraded to a double.
+
+## 11. Testing notes
+
+* All tests are loopback and dependency free; `ctest` runs the same 13 suites
+  under GCC (WSL) and MSVC, plus an ASan+UBSan build.
+* The body codecs are also checked against real implementations in both
+  directions: Python's `email` MIME parser and `json` module parse what we
+  emit, and we parse what `curl -F` / `curl --data-urlencode` emit.
+* A coroutine lambda must not capture by reference when it is passed straight
+  to `push`: the closure dies before the coroutine runs. Use the
+  parameter-style form (`[](Args...) -> Task<T> {}(args...)`) that the other
+  tests use.
+* `HttpResponse::status` defaults to 200, so 0 is the only safe "unset"
+  sentinel for out-parameters.
+* Closing a socket can discard bytes the peer has not read yet (Windows sends an
+  RST). Tests that depend on a peer reading everything park until the test
+  signals completion instead of hanging up.

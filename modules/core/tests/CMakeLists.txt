@@ -6,6 +6,7 @@ set(TASKPP_CORE_TESTS
     WhenAllTests
     AsyncMutexTests
     ChannelTests
+    TimerTests
 )
 
 if (UNIX OR WIN32)

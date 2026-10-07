@@ -1,0 +1,5 @@
+add_executable(tls_TlsTests TlsTests.cpp)
+target_link_libraries(tls_TlsTests PRIVATE taskpp::tls taskpp::http)
+target_include_directories(tls_TlsTests PRIVATE ../../core/tests)
+add_test(NAME tls.TlsTests COMMAND tls_TlsTests)
+set_tests_properties(tls.TlsTests PROPERTIES TIMEOUT 180)
